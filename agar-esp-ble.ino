@@ -15,6 +15,7 @@ BLEService *pService;
 BLECharacteristic *pCharacteristic;
 
 bool connected = false;
+bool isObjectExist = false;
 
 
 // BLECharacteristicCallbacks -> will get callback when client write to esp ( and esp will get value )
@@ -42,9 +43,11 @@ static bool peerAuthenticated() {
 
 void setup() {
   Serial.begin(115200);
+  setupFan();
+
   delay(1000);
 
-  Serial.println("Hello world");
+  Serial.println("Setting up agar e-nose");
 
   if (BLE_PASSKEY == 0) {
     Serial.println("ERROR: Please provide BLE_PASSKEY");
@@ -80,8 +83,19 @@ void setup() {
 }
 
 void loop() {
+  isObjectExist = isDistance();
+  if (isObjectExist) {
+    // if object exist run a bit fan to suck
+    fan(-50);
+  } else {
+    // if object not exist just run fast to clear
+    fan(-maxFanSpeed);
+  }
+
+
   if (connected && peerAuthenticated()) {
     JsonDocument doc = getResponse();
+    doc["chicken"] = isObjectExist
 
     String buf;
     serializeJson(doc, buf);
@@ -89,7 +103,6 @@ void loop() {
     pCharacteristic->setValue(buf.c_str());
     pCharacteristic->notify();
   }
-
 
   delay(1000);
 }

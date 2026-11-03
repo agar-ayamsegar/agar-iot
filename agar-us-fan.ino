@@ -9,7 +9,7 @@ UltraSonicDistanceSensor sensor(trigPin, echoPin);
 // fan
 const int fanInA = 42; // pin 42
 const int fanInB = 41; // pin 41
-const int maxFanSpeed = 140; // speed interval is 0...255, 140 is sweet spot, lower if you want
+const int maxFanSpeed = 100; // speed interval is 0...255, 100 is sweet spot, lower if you want
 
 void fan(int speed) {
   speed = constrain(speed, -maxFanSpeed, maxFanSpeed);
@@ -26,22 +26,14 @@ float medianDistance() {
   return d;
 }
 
-void setup() {
-  Serial.begin(115200);
+void setupFan() {
   pinMode(fanInA, OUTPUT);
   pinMode(fanInB, OUTPUT);
+
+  Serial.println("Setting up agar fan");
 }
 
-void loop() {
+bool isDistance() {
   float dist = medianDistance(); // in cm
-  Serial.println(dist);
-  
-  if (dist > 0 && dist <= 15) {
-    // if distance less than 15
-    fan(-maxFanSpeed);
-  } else {
-    fan(0);
-  }
-
-  delay(100);
+  return dist > 0 && dist < 10; // if less than 10 
 }
