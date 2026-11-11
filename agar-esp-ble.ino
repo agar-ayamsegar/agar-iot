@@ -3,11 +3,11 @@
 #include <BLEServer.h>
 #include <BLESecurity.h>
 #include <ArduinoJson.h>
-
+#include <HCSR04.h>
 
 #define SERVICE_UUID "73332f45-02d1-46ff-a88d-edba7bfc0dc2"
 #define CHARACTERISTIC_UUID "3112abef-cfd7-4bb2-b1fc-ab83c5e3f3d6"
-#define BLE_PASSKEY 0
+#define BLE_PASSKEY 100100
 
 
 BLEServer *pServer;
@@ -16,7 +16,6 @@ BLECharacteristic *pCharacteristic;
 
 bool connected = false;
 bool isObjectExist = false;
-
 
 // BLECharacteristicCallbacks -> will get callback when client write to esp ( and esp will get value )
 // BLEServerCallbacks -> will get callback when something connect or disconnect
@@ -43,18 +42,17 @@ static bool peerAuthenticated() {
 
 void setup() {
   Serial.begin(115200);
-  setupFan();
+  delay(1500);
 
-  delay(1000);
-
-  Serial.println("Setting up agar e-nose");
+  Serial.println("Setting up agar electrode (ADS1115)");
+  electrodeBegin();
 
   if (BLE_PASSKEY == 0) {
     Serial.println("ERROR: Please provide BLE_PASSKEY");
     return;
   }
 
-  BLEDevice::init("BeeSP-Bluetooth");
+  BLEDevice::init("Agar-Bluetooth");
   BLESecurity::setPassKey(true, BLE_PASSKEY);
   BLESecurity::setAuthenticationMode(true, true, true);  // secure connections
   BLESecurity::setCapability(ESP_IO_CAP_OUT);            // board display, client type it
@@ -83,22 +81,17 @@ void setup() {
 }
 
 void loop() {
-  isObjectExist = isDistance();
-  if (isObjectExist) {
-    // if object exist run a bit fan to suck
-    fan(-50);
-  } else {
-    // if object not exist just run fast to clear
-    fan(-maxFanSpeed);
-  }
 
+  if (!connected) Serial.println("# advertising");   // proof of life while unpaired
 
   if (connected && peerAuthenticated()) {
-    JsonDocument doc = getResponse();
-    doc["chicken"] = isObjectExist
+    JsonDocument doc = electrodeResponse();   // {"ohm":..,"v_total":..,"v_chk":..}
+    doc["chicken"] = doc["ohm"].as<float>() > 0;   // probe is in meat
 
     String buf;
     serializeJson(doc, buf);
+
+    Serial.println(buf);
 
     pCharacteristic->setValue(buf.c_str());
     pCharacteristic->notify();
