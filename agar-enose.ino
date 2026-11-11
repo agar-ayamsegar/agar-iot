@@ -23,6 +23,13 @@ const float RL_135 = 2.0;   // kOhm, load resistor on MQ-135 module ("202")
 const float R1 = 10.0;      // kOhm, divider top    (AO -> GPIO)
 const float R2 = 10.0;      // kOhm, divider bottom (GPIO -> GND)
 
+// UNFRESH when the MQ-135 resistance drops below this fraction of its clean-box
+// value. Swept over 71 runs in agar-data-collection (A01-A17, railed runs dropped):
+// FRESH median rel_135 0.76, UNFRESH 0.21; 0.45 is the best split at 88.7 % (4 FP,
+// 4 FN, every miss at smell_level 2-3). MQ-137 peaked at 81.7 %, so it is not used.
+// ponytail: single fixed threshold, retune here if the box or sensors change.
+const float UNFRESH_REL_135 = 0.45;
+
 const int N_AVG       = 20;
 const int CAL_SAMPLES = 300;            // ~60 s, averages out sensor wiggle
 const unsigned long WARMUP_MS = 600000; // 10 min hot before readings mean anything
@@ -96,13 +103,67 @@ void enoseCalibrate() {
     Serial.println("# WARNING: calibrated before the sensors were warm (10 min) -- redo with c");
 }
 
+#if DUMMY_MODE
+// Replays agar-dummy.ino instead of reading the ADC. Those rows are 10-bit counts
+// at a 5 V reference, logged on an Uno that read AO directly -- the module's own RL
+// was the only load. This board also hangs the 20k divider off AO, so for the same
+// sensor resistance AO sits lower here. Recover Rs the way the Uno would have, then
+// re-derive what this board's pin sees; everything downstream then runs unchanged.
+static float dummyPinMv(uint16_t raw, float rl) {
+  float vUno = raw / 1023.0 * VCC;                       // Uno saw AO undivided
+  if (vUno < 0.01) vUno = 0.01;
+  if (vUno > VCC - 0.01) vUno = VCC - 0.01;
+  float rs = rl * (VCC - vUno) / vUno;                   // true sensor resistance
+  float rlEff = rl * (R1 + R2) / (rl + R1 + R2);         // RL once our divider loads it
+  return VCC * rlEff / (rs + rlEff) * 1000.0 * R2 / (R1 + R2);
+}
+
+static void dummyRead(int &raw137, float &rs137, int &raw135, float &rs135) {
+  const uint16_t *row = DUMMY_ROWS[(millis() / DUMMY_ROW_MS) % DUMMY_N];
+  float mv137 = dummyPinMv(row[0], RL_137), mv135 = dummyPinMv(row[1], RL_135);
+
+  rs137 = rsFromPinMv(mv137, RL_137);
+  rs135 = rsFromPinMv(mv135, RL_135);
+  raw137 = mv137 / 3300.0 * 4095;        // what this board's 12-bit ADC would have reported
+  raw135 = mv135 / 3300.0 * 4095;
+  temperature = row[2];
+  humidity    = row[3];
+  dhtOk       = true;
+  isObjectExist = row[4];                // the table drives "chicken" too
+
+  rsAir137 = rsFromPinMv(dummyPinMv(DUMMY_BASE_137, RL_137), RL_137);   // stands in for "c"
+  rsAir135 = rsFromPinMv(dummyPinMv(DUMMY_BASE_135, RL_135), RL_135);
+  calibrated = true;
+}
+#endif
+
+static bool isUnfresh(float rel135) { return rel135 > 0 && rel135 < UNFRESH_REL_135; }
+
 // 358.6 mV at the pin = 0.717 V at the sensor -> 10.86 kOhm on the MQ-135.
 // Taken from a real log row, so this fails if the divider math is ever broken.
+// The two rel_135 values are real plateaus from A08 (h2 FRESH, h7 UNFRESH).
 void enoseSelfCheck() {
   float rs = rsFromPinMv(358.6, RL_135);
   Serial.print("# selfcheck rs_135(358.6 mV) = ");
   Serial.print(rs, 2);
   Serial.println(rs > 10.7 && rs < 11.0 ? " kOhm  OK" : " kOhm  FAIL");
+
+  bool ok = !isUnfresh(0.799) && isUnfresh(0.247) && !isUnfresh(0);  // 0 = uncalibrated
+  Serial.println(ok ? "# selfcheck unfresh  OK" : "# selfcheck unfresh  FAIL");
+
+#if DUMMY_MODE
+  // Pins the last row of all four phases: both empty-box ones sit at ~1.0, the
+  // FRESH plateau stays above the threshold, the UNFRESH one drops below it.
+  float air = rsFromPinMv(dummyPinMv(DUMMY_BASE_135, RL_135), RL_135);
+  float p[4];
+  for (int i = 0; i < 4; i++)
+    p[i] = rsFromPinMv(dummyPinMv(DUMMY_ROWS[(i + 1) * DUMMY_SEG_N - 1][1], RL_135), RL_135) / air;
+  Serial.print("# selfcheck dummy rel_135 base/fresh/base/unfresh = ");
+  for (int i = 0; i < 4; i++) { Serial.print(p[i], 3); Serial.print(i < 3 ? " / " : ""); }
+  bool phasesOk = p[0] > 0.95 && p[0] < 1.05 && p[2] > 0.95 && p[2] < 1.05
+                  && !isUnfresh(p[1]) && isUnfresh(p[3]);
+  Serial.println(phasesOk ? "  OK" : "  FAIL");
+#endif
 }
 
 void enoseSerial() {
@@ -126,11 +187,16 @@ static float rel(float rs, float rsAir) { return rsAir > 0 ? r3(rs / rsAir) : 0;
 JsonDocument getResponse() {
   if (!begun) enoseBegin();
   enoseSerial();
-  readTempAndHum();
 
   int raw137, raw135;
-  float rs137 = readMq(PIN_MQ137, RL_137, raw137);
-  float rs135 = readMq(PIN_MQ135, RL_135, raw135);
+  float rs137, rs135;
+#if DUMMY_MODE
+  dummyRead(raw137, rs137, raw135, rs135);
+#else
+  readTempAndHum();
+  rs137 = readMq(PIN_MQ137, RL_137, raw137);
+  rs135 = readMq(PIN_MQ135, RL_135, raw135);
+#endif
 
   JsonDocument doc;
   doc["mq_137"] = raw137;               // 0-4095 now, not 0-1023
@@ -138,7 +204,9 @@ JsonDocument getResponse() {
   doc["rs_137"] = r2(rs137);            // kOhm. WAS the pin voltage under this same key
   doc["rs_135"] = r2(rs135);
   doc["rel_137"] = rel(rs137, rsAir137);     // 0 = not calibrated yet (send "c")
-  doc["rel_135"] = rel(rs135, rsAir135);
+  float rel135 = rel(rs135, rsAir135);
+  doc["rel_135"] = rel135;
+  doc["unfresh"] = isUnfresh(rel135);        // false while uncalibrated -- rel135 is 0 then
   doc["temp"]       = temperature;
   doc["humidity"]   = humidity;
   return doc;                           // ~160 bytes; iOS negotiates ~185, so keep it lean
